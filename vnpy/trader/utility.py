@@ -1,7 +1,7 @@
 """
 General utility functions.
 """
-
+import datetime
 import json
 from pathlib import Path
 from typing import Callable
@@ -461,3 +461,154 @@ def virtual(func: "callable"):
     that can be (re)implemented by subclasses.
     """
     return func
+
+
+class NewBarGenerator:
+
+    def __init__(
+        self,
+        on_bar: Callable,
+        window: int = 0,
+        on_window_bar: Callable = None,
+        interval: Interval = Interval.MINUTE
+    ):
+        self.bar = None
+        self.on_bar = on_bar
+
+        self.interval = interval
+        self.interval_count = 0
+
+        self.window = window
+        self.window_bar = None
+        self.on_window_bar = on_window_bar
+
+        self.last_tick = None
+        self.last_bar = None
+
+        self.bar_count = 0
+
+    def update_tick(self, tick: TickData):
+        new_minute = False
+        tick_time = self.get_time(tick.datetime)
+        tick_hour_minute = self.get_hour_minute(tick.datetime)
+
+        if not tick.last_price or tick_time == '10:15:00':
+            return
+        if tick_time == '20:59:00' or tick_time == '08:59:00':
+            self.last_tick = tick
+
+        if not self.bar:
+            new_minute = True
+        elif tick_hour_minute != self.get_hour_minute(self.last_tick.datetime):
+            if tick_time != '15:00:00' and tick_time != '23:00:00':
+                self.on_bar(self.bar)
+                new_minute = True
+
+        if new_minute:
+            self.bar = BarData(
+                symbol=tick.symbol,
+                exchange=tick.exchange,
+                interval=Interval.MINUTE,
+                datetime=tick.datetime,
+                gateway_name=tick.gateway_name,
+                open_price=tick.last_price,
+                high_price=tick.last_price,
+                low_price=tick.last_price,
+                close_price=tick.last_price,
+                open_interest=tick.open_interest
+            )
+        else:
+            self.bar.high_price = max(self.bar.high_price, tick.last_price)
+            self.bar.low_price = min(self.bar.low_price, tick.last_price)
+            self.bar.close_price = tick.last_price
+            self.bar.open_interest = tick.open_interest
+
+            if tick_time == '15:00:00':
+                tick.datetime = datetime.datetime(tick.datetime.year,
+                                                      tick.datetime.month,
+                                                      tick.datetime.day,
+                                                      14, 59, 59, 999000)
+            elif tick_time == '23:00:00':
+                tick.datetime = datetime.datetime(tick.datetime.year,
+                                                      tick.datetime.month,
+                                                      tick.datetime.day,
+                                                      22, 59, 59, 999000)
+
+        if self.last_tick:
+            if self.get_time(self.last_tick.datetime) == '20:59:00' or \
+                self.get_time(self.last_tick.datetime) == '08:59:00':
+                self.bar.open_price = self.last_tick.last_price
+            volume_change = tick.volume - self.last_tick.volume
+            self.bar.volume += max(volume_change, 0)
+
+        self.last_tick = tick
+
+    def update_bar(self, bar: BarData):
+        # print(self.interval == Interval.MINUTE)
+
+        finished = False
+        bar_hour_minute = self.get_hour_minute(bar.datetime)
+        # print(bar_hour_minute)
+        if self.interval.value == Interval.MINUTE.value:
+            if (self.last_bar and self.bar_count == self.window) or bar_hour_minute == '14:59':
+                self.window_bar.high_price = max(
+                    self.window_bar.high_price, bar.high_price)
+                self.window_bar.low_price = min(
+                    self.window_bar.low_price, bar.low_price)
+                self.window_bar.close_price = bar.close_price
+                self.window_bar.volume += int(bar.volume)
+                finished = True
+                self.bar_count = 0
+        elif self.interval.value == Interval.HOUR.value:
+            if (self.last_bar and self.bar_count == 60 * self.window) \
+                    or bar_hour_minute == '14:59':
+                if bar_hour_minute == '14:59':
+                    self.window_bar.high_price = max(
+                        self.window_bar.high_price, bar.high_price)
+                    self.window_bar.low_price = min(
+                        self.window_bar.low_price, bar.low_price)
+                    self.window_bar.close_price = bar.close_price
+                    self.window_bar.volume += int(bar.volume)
+                finished = True
+                self.bar_count = 0
+        if finished:
+            if bar_hour_minute == '14:59':
+                dtime = self.window_bar.datetime.strftime('%H:%M:%S') + ' - ' + bar.datetime.strftime('%H:%M:%S')
+            else:
+                dtime = self.window_bar.datetime.strftime('%H:%M:%S') + ' - ' + self.last_bar.datetime.strftime('%H:%M:%S')
+            if self.interval.value == Interval.HOUR.value:
+                # print('finished ', dtime)
+                pass
+
+            self.on_window_bar(self.window_bar)
+            self.window_bar = None
+
+        if bar_hour_minute == '14:59':
+            return
+
+        self.bar_count += 1
+        self.last_bar = bar
+
+        if not self.window_bar:
+            self.window_bar = BarData(
+                symbol=bar.symbol,
+                exchange=bar.exchange,
+                datetime=bar.datetime,
+                gateway_name=bar.gateway_name,
+                open_price=bar.open_price,
+                high_price=bar.high_price,
+                low_price=bar.low_price
+            )
+        else:
+            self.window_bar.high_price = max(
+                self.window_bar.high_price, bar.high_price)
+            self.window_bar.low_price = min(
+                self.window_bar.low_price, bar.low_price)
+            self.window_bar.close_price = bar.close_price
+            self.window_bar.volume += int(bar.volume)
+
+    def get_time(self, date: datetime):
+        return date.strftime('%H:%M:%S')
+
+    def get_hour_minute(self, date: datetime):
+        return date.strftime('%H:%M')
